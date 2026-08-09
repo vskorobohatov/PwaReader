@@ -1,0 +1,129 @@
+@import "tailwindcss";
+
+@source "../**/*.{js,jsx,ts,tsx}";
+
+/* Base reset handled by Tailwind Preflight */
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  line-height: 1.5;
+  min-height: 100dvh;
+}
+
+#root {
+  min-height: 100dvh;
+}
+
+/* Prevent horizontal scroll */
+html, body, #root {
+  overflow-x: hidden;
+}
+
+/* Focus styles for accessibility */
+*:focus-visible {
+  outline: 2px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: rgba(0, 0, 0, 0.2);
+  border-radius: 3px;
+}
+
+/* Reader themes applied via CSS custom properties on .reader-content */
+.reader-content[data-theme="light"] {
+  --reader-bg: #ffffff;
+  --reader-text: #1a1a1a;
+  --reader-muted: #6b7280;
+  --reader-border: #e5e7eb;
+}
+
+.reader-content[data-theme="dark"] {
+  --reader-bg: #1a1a1a;
+  --reader-text: #d4d4d4;
+  --reader-muted: #808080;
+  --reader-border: #333333;
+}
+
+.reader-content[data-theme="sepia"] {
+  --reader-bg: #f5e6c8;
+  --reader-text: #433422;
+  --reader-muted: #7a6b5a;
+  --reader-border: #d4c4a8;
+}
+
+.reader-content {
+  background-color: var(--reader-bg);
+  color: var(--reader-text);
+}
+
+/* Reader paragraph styles */
+.reader-content .reader-paragraph {
+  margin-bottom: calc(var(--reader-font-size, 18px) * var(--reader-paragraph-spacing, 1.2));
+  text-align: justify;
+  hyphens: auto;
+}
+
+.reader-content .reader-subtitle {
+  margin-top: calc(var(--reader-font-size, 18px) * 2);
+  margin-bottom: calc(var(--reader-font-size, 18px) * 1.2);
+  font-weight: 700;
+  font-size: calc(var(--reader-font-size, 18px) * 1.4);
+}
+
+.reader-content .reader-epigraph {
+  margin-left: 20%;
+  font-style: italic;
+  color: var(--reader-muted);
+  border-left: 3px solid var(--reader-border);
+  padding-left: 1em;
+  margin-bottom: calc(var(--reader-font-size, 18px) * 1.5);
+}
+
+.reader-content .reader-poem {
+  margin: calc(var(--reader-font-size, 18px) * 1.5) 0;
+  white-space: pre-wrap;
+  font-style: italic;
+  text-align: center;
+}
+
+.reader-content .reader-poem-title {
+  font-weight: 700;
+  font-style: normal;
+  margin-bottom: calc(var(--reader-font-size, 18px) * 0.8);
+}
+
+.reader-content img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1em auto;
+  border-radius: 4px;
+}
+
+/* Utility for preventing text selection on UI controls */
+.no-select {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Transitions */
+.transition-theme {
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
