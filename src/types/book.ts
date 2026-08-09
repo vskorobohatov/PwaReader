@@ -7,6 +7,7 @@ export interface ReadingProgress {
   lastReadTimestamp: number;
   isCompleted: boolean;
   lastChapterIndex?: number;
+  currentPage?: number;
 }
 
 export interface Book {

@@ -1,10 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import Button from '../components/ui/Button';
+import ReaderSettingsPanel from '../components/reader/ReaderSettingsPanel';
 import { getBook, updateBook } from '../lib/db';
 import { useReaderSettings } from '../hooks/useSettings';
 import type { ContentElement, Chapter } from '../types/fb2-content';
-import type { PaginationMode } from '../types/settings';
 import { getFontFamily } from '../App';
 
 function ReaderContent({ elements }: { elements: ContentElement[] }) {
@@ -37,10 +37,23 @@ function ReaderContent({ elements }: { elements: ContentElement[] }) {
         if (el.type === 'image') {
           return <img key={i} src={el.src} alt={el.alt || ''} className="reader-image" />;
         }
+        if (el.type === 'subtitle') {
+          return <div key={i} className="reader-subtitle" dangerouslySetInnerHTML={{ __html: el.html }} />;
+        }
         return null;
       })}
     </>
   );
+}
+
+/**
+ * Represents a single page of content in page mode.
+ * Each page contains a slice of elements from a specific chapter.
+ */
+interface PageInfo {
+  chapterIndex: number;
+  chapterTitle?: string;
+  elements: ContentElement[];
 }
 
 export default function Reader() {
@@ -60,8 +73,16 @@ export default function Reader() {
   const [totalPages, setTotalPages] = useState(0);
   const [uiVisible, setUiVisible] = useState(true);
 
+  // Page mode: pre-computed pages (array of PageInfo)
+  const [pages, setPages] = useState<PageInfo[]>([]);
+  const [pagesComputed, setPagesComputed] = useState(false);
+
+  // Ref to always use the latest computePages inside requestAnimationFrame callback
+  const computePagesRef = useRef<typeof computePages>(undefined);
+
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const uiTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!bookId) return;
@@ -76,44 +97,197 @@ export default function Reader() {
         if (book.readingProgress?.lastChapterIndex !== undefined) {
           setCurrentChapterIndex(book.readingProgress.lastChapterIndex);
         }
+        if (book.readingProgress?.currentPage !== undefined) {
+          setCurrentPage(book.readingProgress.currentPage);
+        }
         await updateBook({ ...book, lastOpened: Date.now() });
       } catch { setError('Failed to load book'); }
       finally { setLoading(false); }
     })();
   }, [bookId]);
 
-  // Calculate total pages when content or container changes (page mode only)
-  const calculateTotalPages = useCallback(() => {
+  // Compute pages when chapters or settings change (page mode only)
+  const computePages = useCallback(() => {
+    if (rs.paginationMode !== 'page') return;
+
     const container = contentRef.current;
-    if (!container || rs.paginationMode !== 'page') return;
+    if (!container) return;
 
-    const viewportHeight = container.clientHeight;
-    const scrollHeight = container.scrollHeight;
-    const pages = Math.ceil(scrollHeight / viewportHeight);
-    setTotalPages(Math.max(1, pages));
-  }, [rs.paginationMode, chapters]);
+    const headerHeight = 56;
+    const bottomBarHeight = 48 + 4; // page indicator + progress bar
+    const paddingTopVal = Math.max(rs.paddingTop, headerHeight);
+    const paddingBottomVal = Math.max(rs.paddingBottom, bottomBarHeight);
 
-  // Recalculate pages on resize
+    const viewportHeight = container.clientHeight - paddingTopVal - paddingBottomVal;
+
+    const allPages: PageInfo[] = [];
+    const fontFamily = getFontFamily(rs.fontFamily);
+    const paragraphMargin = rs.fontSize * rs.paragraphSpacing;
+
+    // Use an off-screen container for measurement
+    let measContainer = document.getElementById('__reader-measure-container__') as HTMLDivElement | null;
+    if (!measContainer) {
+      measContainer = document.createElement('div');
+      measContainer.id = '__reader-measure-container__';
+      measContainer.style.cssText = `
+        position: fixed;
+        visibility: hidden;
+        pointer-events: none;
+        font-size: ${rs.fontSize}px;
+        line-height: ${rs.lineHeight};
+        padding-left: ${rs.paddingLeft}px;
+        padding-right: ${rs.paddingRight}px;
+        font-family: ${fontFamily};
+        width: min(100vw, 42rem);
+        overflow: hidden;
+        height: 0;
+      `;
+      document.body.appendChild(measContainer);
+    } else {
+      measContainer.style.fontSize = `${rs.fontSize}px`;
+      measContainer.style.lineHeight = `${rs.lineHeight}`;
+      measContainer.style.fontFamily = fontFamily;
+    }
+
+    function measureElement(el: ContentElement): number {
+      const div = document.createElement('div');
+      measContainer!.appendChild(div);
+
+      if (el.type === 'paragraph') {
+        div.className = 'reader-paragraph';
+        div.style.marginBottom = `${paragraphMargin}px`;
+        div.innerHTML = el.html;
+      } else if (el.type === 'emptyLine') {
+        div.innerHTML = '<br />';
+      } else if (el.type === 'poem') {
+        div.className = 'reader-poem';
+        let poemHtml = '';
+        if (el.title) {
+          poemHtml += `<div class="reader-poem-title">${el.title}</div>`;
+        }
+        el.stanzas.forEach((stanza) => {
+          poemHtml += '<div style="margin-bottom:1rem;">';
+          stanza.lines.forEach((line) => {
+            poemHtml += `<div>${line}</div>`;
+          });
+          poemHtml += '</div>';
+        });
+        div.innerHTML = poemHtml;
+      } else if (el.type === 'epigraph') {
+        div.className = 'reader-epigraph';
+        div.innerHTML = el.html;
+        div.style.marginBottom = `${paragraphMargin * 1.5}px`;
+      } else if (el.type === 'image') {
+        const img = document.createElement('img');
+        img.src = el.src;
+        img.alt = el.alt || '';
+        img.style.maxWidth = '100%';
+        img.style.display = 'block';
+        img.style.margin = '1em auto';
+        div.appendChild(img);
+        return rs.fontSize * 3;
+      } else if (el.type === 'subtitle') {
+        div.className = 'reader-subtitle';
+        div.innerHTML = el.html;
+      }
+
+      const h = div.offsetHeight;
+      if (div.parentNode) div.parentNode.removeChild(div);
+      return h;
+    }
+
+    function splitElementsIntoPages(
+      elements: ContentElement[],
+      availHeight: number,
+      startChapterIdx: number,
+      chapterTitle?: string
+    ): PageInfo[] {
+      const result: PageInfo[] = [];
+      let current: ContentElement[] = [];
+      let height = 0;
+
+      for (const element of elements) {
+        const h = measureElement(element);
+
+        if (current.length > 0 && height + h > availHeight) {
+          result.push({ chapterIndex: startChapterIdx, chapterTitle: chapterTitle, elements: current });
+          current = [element];
+          height = h;
+        } else {
+          current.push(element);
+          height += h;
+        }
+      }
+
+      if (current.length > 0) {
+        result.push({ chapterIndex: startChapterIdx, chapterTitle: chapterTitle, elements: current });
+      }
+
+      return result;
+    }
+
+    // Process each chapter
+    for (let ci = 0; ci < chapters.length; ci++) {
+      const chapter = chapters[ci];
+      let remainingElements = chapter.elements;
+
+      // Handle chapter title as a separate page if chapter is long, or include with first page
+      const pagesForChapter = splitElementsIntoPages(
+        remainingElements,
+        viewportHeight,
+        ci,
+        chapter.title || `Chapter ${ci + 1}`
+      );
+
+      allPages.push(...pagesForChapter);
+    }
+
+    setPages(allPages);
+    setTotalPages(allPages.length);
+    setPagesComputed(true);
+  }, [rs, chapters]);
+
+  // Keep ref up to date so raf callback always uses the latest version
+  computePagesRef.current = computePages;
+
+  // Recalculate pages when settings or chapters change
+  useEffect(() => {
+    // Wait for loading to finish so contentRef is actually in the DOM
+    if (loading) return;
+    if (rs.paginationMode !== 'page') return;
+    if (chapters.length === 0) return;
+    // Reset computed flag when recalculating
+    setPagesComputed(false);
+    // Use requestAnimationFrame to ensure DOM is ready
+    const raf = requestAnimationFrame(() => {
+      computePagesRef.current?.();
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [loading, rs.paginationMode, chapters, rs.fontSize, rs.lineHeight, rs.fontFamily, rs.paddingLeft, rs.paddingRight, rs.paddingTop, rs.paddingBottom, rs.paragraphSpacing]);
+
+  // Recalculate on resize
   useEffect(() => {
     if (rs.paginationMode !== 'page') return;
-    calculateTotalPages();
-
     const handleResize = () => {
-      calculateTotalPages();
+      requestAnimationFrame(() => {
+        computePages();
+      });
     };
-
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [rs.paginationMode, chapters, calculateTotalPages]);
+  }, [rs.paginationMode, chapters, computePages]);
 
-  // Reset page when chapter changes in page mode
+  // Reset page when chapter changes in chapter mode
   useEffect(() => {
     if (rs.paginationMode === 'page') {
-      setCurrentPage(0);
+      // Clamp currentPage to valid range
+      if (pages.length > 0 && currentPage >= pages.length) {
+        setCurrentPage(pages.length - 1);
+      }
     }
-  }, [currentChapterIndex, rs.paginationMode]);
+  }, [pages.length, currentPage, rs.paginationMode]);
 
-  const saveProgress = useCallback(async (position: number, percent: number, chapterIdx?: number) => {
+  const saveProgress = useCallback(async (page: number, percent: number, chapterIdx?: number) => {
     if (!bookId) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(async () => {
@@ -124,70 +298,155 @@ export default function Reader() {
           ...book,
           readingProgress: {
             ...book.readingProgress,
-            currentPosition: position,
             percentageCompleted: Math.min(100, percent),
             isCompleted: percent >= 100,
             lastReadTimestamp: Date.now(),
             lastChapterIndex: chapterIdx !== undefined ? chapterIdx : book.readingProgress?.lastChapterIndex,
+            currentPage: page,
           },
         });
       } catch { /* silent */ }
     }, 1000);
   }, [bookId]);
 
-  const totalElements = useMemo(() => chapters.reduce((s, ch) => s + ch.elements.length, 0), [chapters]);
+  // Hide UI helper
+  const hideUi = useCallback(() => {
+    setUiVisible(false);
+    if (uiTimerRef.current) clearTimeout(uiTimerRef.current);
+  }, []);
 
-  // Scroll to current page when page changes (page mode)
+  // Navigate pages
+  const goToPrevPage = useCallback(() => {
+    if (currentPage > 0) {
+      const newPage = currentPage - 1;
+      setCurrentPage(newPage);
+      hideUi();
+      const percent = totalPages > 1 ? (newPage / (totalPages - 1)) * 100 : 100;
+      saveProgress(newPage, Math.min(100, percent), pages[newPage]?.chapterIndex);
+    }
+  }, [currentPage, totalPages, saveProgress, pages, hideUi]);
+
+  const goToNextPage = useCallback(() => {
+    if (currentPage < totalPages - 1) {
+      const newPage = currentPage + 1;
+      setCurrentPage(newPage);
+      hideUi();
+      const percent = totalPages > 1 ? (newPage / (totalPages - 1)) * 100 : 100;
+      saveProgress(newPage, Math.min(100, percent), pages[newPage]?.chapterIndex);
+    }
+  }, [currentPage, totalPages, saveProgress, pages, hideUi]);
+
+  // Auto-hide UI after inactivity
+  const resetUiTimer = useCallback(() => {
+    setUiVisible(true);
+    if (uiTimerRef.current) clearTimeout(uiTimerRef.current);
+    uiTimerRef.current = setTimeout(() => {
+      setUiVisible(false);
+    }, 4000);
+  }, []);
+
+  // Show UI on mouse move
   useEffect(() => {
-    if (rs.paginationMode !== 'page') return;
     const container = contentRef.current;
     if (!container) return;
 
-    const targetScroll = currentPage * container.clientHeight;
-    container.scrollTop = targetScroll;
-  }, [currentPage, rs.paginationMode]);
+    const handleMouseMove = () => {
+      resetUiTimer();
+    };
 
-  // Save progress on page change (page mode)
+    container.addEventListener('mousemove', handleMouseMove);
+    resetUiTimer();
+
+    return () => {
+      container.removeEventListener('mousemove', handleMouseMove);
+      if (uiTimerRef.current) clearTimeout(uiTimerRef.current);
+    };
+  }, [resetUiTimer]);
+
+  // Keyboard navigation
   useEffect(() => {
-    if (rs.paginationMode !== 'page') return;
-    if (totalPages === 0) return;
-    const percent = totalPages > 1 ? (currentPage / (totalPages - 1)) * 100 : 100;
-    saveProgress(currentPage, Math.min(100, percent), currentChapterIndex);
-  }, [currentPage, totalPages, rs.paginationMode, saveProgress, currentChapterIndex]);
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't navigate if settings panel is open
+      if (showSettings) return;
 
-  const onScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
-    if (rs.paginationMode !== 'page') return;
-    if (totalPages === 0) return;
+      switch (e.key) {
+        case 'ArrowLeft':
+        case 'PageUp':
+          e.preventDefault();
+          if (rs.paginationMode === 'page') {
+            goToPrevPage();
+          } else {
+            goToPreviousChapter();
+          }
+          break;
+        case 'ArrowRight':
+        case 'PageDown':
+        case ' ':
+          e.preventDefault();
+          if (rs.paginationMode === 'page') {
+            goToNextPage();
+          } else {
+            goToNextChapter();
+          }
+          break;
+        case 'Home':
+          e.preventDefault();
+          if (rs.paginationMode === 'page') {
+            setCurrentPage(0);
+          }
+          break;
+        case 'End':
+          e.preventDefault();
+          if (rs.paginationMode === 'page') {
+            setCurrentPage(totalPages - 1);
+          }
+          break;
+        case 'Escape':
+          if (showToc) setShowToc(false);
+          if (showSettings) setShowSettings(false);
+          break;
+      }
+    };
 
-    const el = e.currentTarget;
-    const viewportHeight = el.clientHeight;
-    const currentPageNum = Math.round(el.scrollTop / viewportHeight);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [rs.paginationMode, goToPrevPage, goToNextPage, totalPages, showSettings, showToc]);
 
-    if (currentPageNum !== currentPage && currentPageNum >= 0 && currentPageNum < totalPages) {
-      setCurrentPage(currentPageNum);
-    }
+  // Handle touch/swipe for page navigation
+  useEffect(() => {
+    const container = contentRef.current;
+    if (!container || rs.paginationMode !== 'page') return;
 
-    const scrollPercent = el.scrollTop / (el.scrollHeight - el.clientHeight || 1);
-    saveProgress(Math.floor(scrollPercent * totalElements), scrollPercent * 100, currentChapterIndex);
-  }, [totalElements, saveProgress, rs.paginationMode, currentPage, totalPages, currentChapterIndex]);
+    let touchStartX = 0;
+    let touchStartY = 0;
 
-  // Toggle UI visibility on center click
-  const handleCenterClick = useCallback(() => {
-    setUiVisible(prev => !prev);
-  }, []);
+    const handleTouchStart = (e: TouchEvent) => {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+    };
 
-  // Handle tap zones for page navigation
-  const handleTapLeft = useCallback(() => {
-    if (rs.paginationMode === 'page' && currentPage > 0) {
-      setCurrentPage(prev => prev - 1);
-    }
-  }, [rs.paginationMode, currentPage]);
+    const handleTouchEnd = (e: TouchEvent) => {
+      const dx = e.changedTouches[0].clientX - touchStartX;
+      const dy = e.changedTouches[0].clientY - touchStartY;
 
-  const handleTapRight = useCallback(() => {
-    if (rs.paginationMode === 'page' && currentPage < totalPages - 1) {
-      setCurrentPage(prev => prev + 1);
-    }
-  }, [rs.paginationMode, currentPage, totalPages]);
+      // Only handle horizontal swipes
+      if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > 50) {
+        if (dx > 0) {
+          goToPrevPage();
+        } else {
+          goToNextPage();
+        }
+      }
+    };
+
+    container.addEventListener('touchstart', handleTouchStart, { passive: true });
+    container.addEventListener('touchend', handleTouchEnd, { passive: true });
+
+    return () => {
+      container.removeEventListener('touchstart', handleTouchStart);
+      container.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, [rs.paginationMode, goToPrevPage, goToNextPage]);
 
   // Handle click on content area to determine tap zone
   const handleContentClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -195,19 +454,30 @@ export default function Reader() {
     const x = e.clientX - rect.left;
     const width = rect.width;
 
-    const leftZone = width * 0.25;
-    const rightZone = width * 0.75;
+    const leftZone = width * 0.3;
+    const rightZone = width * 0.7;
 
     if (x < leftZone) {
-      handleTapLeft();
+      goToPrevPage();
     } else if (x > rightZone) {
-      handleTapRight();
+      goToNextPage();
     } else {
-      handleCenterClick();
+      // Center zone toggles UI visibility
+      setUiVisible(prev => {
+        if (prev) {
+          // Hide UI and clear timer
+          if (uiTimerRef.current) clearTimeout(uiTimerRef.current);
+          return false;
+        } else {
+          // Show UI and restart auto-hide timer
+          resetUiTimer();
+          return true;
+        }
+      });
     }
-  }, [handleTapLeft, handleTapRight, handleCenterClick]);
+  }, [goToPrevPage, goToNextPage, resetUiTimer]);
 
-  // Chapter navigation
+  // Chapter navigation (chapter mode)
   const goToPreviousChapter = useCallback(() => {
     setCurrentChapterIndex(prev => Math.max(0, prev - 1));
   }, []);
@@ -216,6 +486,31 @@ export default function Reader() {
     setCurrentChapterIndex(prev => Math.min(chapters.length - 1, prev + 1));
   }, [chapters.length]);
 
+  // Save progress on scroll (chapter mode)
+  const totalElements = useMemo(() => chapters.reduce((s, ch) => s + ch.elements.length, 0), [chapters]);
+
+  const onScroll = useCallback((_e: React.UIEvent<HTMLDivElement>) => {
+    if (rs.paginationMode !== 'chapter') return;
+    const el = _e.currentTarget;
+    const scrollPercent = el.scrollTop / (el.scrollHeight - el.clientHeight || 1);
+    saveProgress(Math.floor(scrollPercent * totalElements), scrollPercent * 100, currentChapterIndex);
+  }, [totalElements, saveProgress, rs.paginationMode, currentChapterIndex]);
+
+  // Restore scroll position for chapter mode
+  useEffect(() => {
+    if (rs.paginationMode !== 'chapter') return;
+    const container = contentRef.current;
+    if (!container || !bookId) return;
+
+    getBook(bookId).then(book => {
+      if (!book || !book.readingProgress?.currentPosition) return;
+      // Rough restoration based on element position
+      const targetScroll = (book.readingProgress.currentPosition / totalElements) * (container.scrollHeight - container.clientHeight);
+      container.scrollTop = targetScroll;
+    });
+  }, [rs.paginationMode, bookId, totalElements]);
+
+  // Show spinner only while book data is loading from database
   if (loading) {
     return <div className="h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center"><div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" /></div>;
   }
@@ -229,40 +524,16 @@ export default function Reader() {
     );
   }
 
-  const themeNames: Record<string, string> = { light: '☀️ Light', dark: '🌙 Dark', sepia: '📜 Sepia' };
-  const fontNames: Record<string, string> = { system: 'System', serif: 'Serif', 'sans-serif': 'Sans-serif', monospace: 'Mono' };
-
-  const NumberInput = ({ label, value, min, max, step, onChange, unit = '' }: {
-    label: string;
-    value: number;
-    min: number;
-    max: number;
-    step: number;
-    onChange: (val: number) => void;
-    unit?: string;
-  }) => (
-    <div>
-      <label className="text-xs font-medium mb-1.5 block opacity-70">{label}: {value}{unit}</label>
-      <input
-        type="number"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={e => {
-          const val = Number(e.target.value);
-          if (!isNaN(val)) onChange(Math.min(max, Math.max(min, val)));
-        }}
-        className="w-full px-2 py-1 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
-      />
-    </div>
-  );
-
   const currentChapter = chapters[currentChapterIndex];
 
   // Compute dynamic padding for content area based on visible UI overlays
-  const headerHeight = showSettings ? 120 : 56;
+  const headerHeight = 56;
   const bottomBarHeight = rs.paginationMode === 'chapter' && uiVisible ? 72 : (rs.paginationMode === 'page' && uiVisible ? 48 : 4);
+
+  // Current page data for page mode
+  const currentPageData = pages[currentPage];
+  // Get the previous page's chapter title to detect chapter transitions
+  const prevPageChapterTitle = currentPageData?.chapterTitle;
 
   return (
     <div className="h-screen relative reader-content overflow-hidden" data-theme={rs.theme}>
@@ -276,7 +547,12 @@ export default function Reader() {
         <button onClick={() => navigate(-1)} className="py-1 px-2 hover:opacity-70" aria-label="Back">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
         </button>
-        <h1 className="text-sm font-medium flex-1 mx-4 truncate text-center">{bookTitle}</h1>
+        <h1 className="text-sm font-medium flex-1 mx-4 truncate text-center">
+          {rs.paginationMode === 'page' && currentPageData
+            ? `${currentPageData.chapterTitle || bookTitle}`
+            : bookTitle
+          }
+        </h1>
         <div className="flex gap-1">
           <button onClick={() => setShowToc(true)} className="py-1 px-2 hover:opacity-70" aria-label="TOC">
             <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" /></svg>
@@ -287,60 +563,8 @@ export default function Reader() {
         </div>
       </header>
 
-      {/* Settings Panel - absolute overlay below header */}
-      {showSettings && (
-        <div className="absolute top-[56px] left-0 right-0 z-20 px-4 py-3 border-b space-y-3 transition-all duration-300" style={{ borderColor: 'var(--reader-border)', backgroundColor: 'var(--reader-bg)' }}>
-          {/* Theme */}
-          <div>
-            <label className="text-xs font-medium mb-1.5 block opacity-70">Theme</label>
-            <div className="flex gap-2">
-              {(['light', 'dark', 'sepia'] as const).map(t => (
-                <button key={t} onClick={() => updateSettings({ theme: t })} className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${rs.theme === t ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'}`}>{themeNames[t]}</button>
-              ))}
-            </div>
-          </div>
-          {/* Font */}
-          <div>
-            <label className="text-xs font-medium mb-1.5 block opacity-70">Font</label>
-            <div className="flex gap-2">
-              {(['system', 'serif', 'sans-serif', 'monospace'] as const).map(f => (
-                <button key={f} onClick={() => updateSettings({ fontFamily: f })} className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${rs.fontFamily === f ? 'bg-blue-600 text-white border-blue-600' : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'}`}>{fontNames[f]}</button>
-              ))}
-            </div>
-          </div>
-          {/* Pagination Mode */}
-          <div>
-            <label className="text-xs font-medium mb-1.5 block opacity-70">Pagination</label>
-            <div className="flex gap-2">
-              {(['chapter', 'page'] as PaginationMode[]).map(m => (
-                <button
-                  key={m}
-                  onClick={() => updateSettings({ paginationMode: m })}
-                  className={`px-3 py-1.5 rounded-lg text-sm border transition-colors ${
-                    rs.paginationMode === m
-                      ? 'bg-blue-600 text-white border-blue-600'
-                      : 'border-gray-300 dark:border-gray-600 hover:bg-gray-100 dark:hover:bg-gray-700'
-                  }`}
-                >
-                  {m === 'chapter' ? '📖 Chapter' : '📄 Page'}
-                </button>
-              ))}
-            </div>
-          </div>
-          {/* Font Size */}
-          <NumberInput label="Size" value={rs.fontSize} min={14} max={32} step={1} unit="px" onChange={v => updateSettings({ fontSize: v })} />
-          {/* Line Height */}
-          <NumberInput label="Line Height" value={rs.lineHeight} min={1.4} max={2} step={0.1} onChange={v => updateSettings({ lineHeight: v })} />
-          {/* Padding Top */}
-          <NumberInput label="Padding Top" value={rs.paddingTop} min={8} max={32} step={2} unit="px" onChange={v => updateSettings({ paddingTop: v })} />
-          {/* Padding Left */}
-          <NumberInput label="Padding Left" value={rs.paddingLeft} min={8} max={32} step={2} unit="px" onChange={v => updateSettings({ paddingLeft: v })} />
-          {/* Padding Right */}
-          <NumberInput label="Padding Right" value={rs.paddingRight} min={8} max={32} step={2} unit="px" onChange={v => updateSettings({ paddingRight: v })} />
-          {/* Padding Bottom */}
-          <NumberInput label="Padding Bottom" value={rs.paddingBottom} min={8} max={32} step={2} unit="px" onChange={v => updateSettings({ paddingBottom: v })} />
-        </div>
-      )}
+      {/* Settings Panel - full-screen popover with animation */}
+      <ReaderSettingsPanel visible={showSettings} settings={rs} onUpdateSettings={updateSettings} onClose={() => setShowSettings(false)} />
 
       {/* Table of Contents Modal */}
       {showToc && (
@@ -353,11 +577,20 @@ export default function Reader() {
               {chapters.map((ch, i) => (
                 <button
                   key={i}
-                  onClick={() => { setCurrentChapterIndex(i); setShowToc(false); }}
+                  onClick={() => {
+                    if (rs.paginationMode === 'chapter') {
+                      setCurrentChapterIndex(i);
+                    } else {
+                      // Find the first page belonging to this chapter
+                      const pageIdx = pages.findIndex(p => p.chapterIndex === i);
+                      if (pageIdx !== -1) setCurrentPage(pageIdx);
+                    }
+                    setShowToc(false);
+                  }}
                   className={`w-full text-left px-3 py-2 rounded-lg text-sm truncate ${
-                    i === currentChapterIndex
-                      ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600'
-                      : 'hover:bg-gray-100 dark:hover:bg-gray-700'
+                    rs.paginationMode === 'chapter'
+                      ? (i === currentChapterIndex ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600' : 'hover:bg-gray-100 dark:hover:bg-gray-700')
+                      : (currentPageData?.chapterIndex === i ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600' : 'hover:bg-gray-100 dark:hover:bg-gray-700')
                   }`}
                 >
                   {ch.title || `Chapter ${i + 1}`}
@@ -368,47 +601,57 @@ export default function Reader() {
         </div>
       )}
 
-      {/* Reader Content - fills full viewport with dynamic padding */}
+      {/* Reader Content */}
       <div
         ref={contentRef}
         onScroll={onScroll}
-        onClick={handleContentClick}
-        className={`absolute inset-0 overflow-y-auto ${rs.paginationMode === 'page' ? 'cursor-pointer' : ''}`}
+        onClick={rs.paginationMode === 'page' ? handleContentClick : undefined}
+        className={`absolute inset-0 ${rs.paginationMode === 'page' ? 'overflow-hidden cursor-pointer' : 'overflow-y-auto'}`}
         style={{
           fontFamily: getFontFamily(rs.fontFamily),
           fontSize: `${rs.fontSize}px`,
           lineHeight: rs.lineHeight,
         }}
       >
-        <div className="max-w-2xl mx-auto" style={{
+        <div className="h-full flex items-start justify-center" style={{
           paddingLeft: `${rs.paddingLeft}px`,
           paddingRight: `${rs.paddingRight}px`,
           paddingTop: `${Math.max(rs.paddingTop, headerHeight)}px`,
           paddingBottom: `${Math.max(rs.paddingBottom, bottomBarHeight)}px`,
         }}>
-          {rs.paginationMode === 'chapter' ? (
-            /* Chapter Mode - render single chapter */
-            <>
-              {currentChapter && (
-                <div>
-                  {currentChapter.title && (
-                    <h2 className="text-xl font-bold mb-4 mt-6">{currentChapter.title}</h2>
-                  )}
-                  <ReaderContent elements={currentChapter.elements} />
-                </div>
-              )}
-            </>
-          ) : (
-            /* Page Mode - render all chapters for pagination calculation */
-            <>
-              {chapters.map((chapter, ci) => (
-                <div key={ci} className="mb-8">
-                  {chapter.title && <h2 className="text-xl font-bold mb-4 mt-6">{chapter.title}</h2>}
-                  <ReaderContent elements={chapter.elements} />
-                </div>
-              ))}
-            </>
-          )}
+          <div className="max-w-2xl w-full">
+            {rs.paginationMode === 'chapter' ? (
+              /* Chapter Mode - render single chapter with scrolling */
+              <>
+                {currentChapter && (
+                  <div>
+                    {currentChapter.title && (
+                      <h2 className="text-xl font-bold mb-4 mt-6">{currentChapter.title}</h2>
+                    )}
+                    <ReaderContent elements={currentChapter.elements} />
+                  </div>
+                )}
+              </>
+            ) : (
+              /* Page Mode - render single page, no scrolling */
+              <>
+                {currentPageData ? (
+                  <div className="h-full">
+                    {/* Show chapter title when entering a new chapter */}
+                    {currentPage === 0 || pages[currentPage - 1]?.chapterIndex !== currentPageData.chapterIndex ? (
+                      <h2 className="text-xl font-bold mb-4 mt-6">{currentPageData.chapterTitle}</h2>
+                    ) : null}
+                    <ReaderContent elements={currentPageData.elements} />
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-full gap-3">
+                    <div className="animate-spin h-8 w-8 border-4 border-blue-600 border-t-transparent rounded-full" />
+                    <p className="text-sm opacity-60">Preparing pages…</p>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </div>
 
@@ -441,17 +684,34 @@ export default function Reader() {
         </div>
       )}
 
-      {/* Page Indicator (Page Mode) - absolute overlay */}
+      {/* Page Navigation (Page Mode) - absolute overlay */}
       {rs.paginationMode === 'page' && (
         <div
-          className={`absolute bottom-[4px] left-0 right-0 z-20 flex items-center justify-center py-2 border-t transition-all duration-300 ${
+          className={`absolute bottom-[4px] left-0 right-0 z-20 flex items-center justify-between px-4 py-2 border-t transition-all duration-300 ${
             uiVisible ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-full pointer-events-none'
           }`}
           style={{ borderColor: 'var(--reader-border)', backgroundColor: 'var(--reader-bg)' }}
+          onClick={e => e.stopPropagation()}
         >
+          <button
+            onClick={goToPrevPage}
+            disabled={currentPage === 0}
+            className="py-1 px-3 text-sm disabled:opacity-30 hover:opacity-70"
+            aria-label="Previous page"
+          >
+            ← Prev
+          </button>
           <span className="text-xs opacity-60">
             Page {currentPage + 1} / {totalPages}
           </span>
+          <button
+            onClick={goToNextPage}
+            disabled={currentPage >= totalPages - 1}
+            className="py-1 px-3 text-sm disabled:opacity-30 hover:opacity-70"
+            aria-label="Next page"
+          >
+            Next →
+          </button>
         </div>
       )}
 
