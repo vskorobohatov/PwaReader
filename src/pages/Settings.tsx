@@ -73,12 +73,6 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* Reading */}
-        <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-4">
-          <h2 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2">Reading</h2>
-          <Toggle checked={settings.openLastBook} onChange={() => updateSettings({ openLastBook: !settings.openLastBook })} label="Open last book on startup" />
-        </div>
-
         {/* Data */}
         <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm p-4">
           <h2 className="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-3">Data Management</h2>

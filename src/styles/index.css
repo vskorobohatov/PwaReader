@@ -75,9 +75,10 @@ html, body, #root {
 
 /* Reader paragraph styles */
 .reader-content .reader-paragraph {
-  margin-bottom: calc(var(--reader-font-size, 18px) * var(--reader-paragraph-spacing, 1.2));
+  margin-bottom: 4px;
   text-align: justify;
   hyphens: auto;
+  text-indent: 2em;
 }
 
 .reader-content .reader-subtitle {

@@ -25,15 +25,17 @@ export async function exportLibrary(): Promise<{ blob: Blob; filename: string }>
       readingProgress: b.readingProgress,
     })),
     settings: {
-      openLastBook: false,
       appTheme: 'light',
       fontFamily: 'system',
       fontSize: 18,
       theme: 'light',
       lineHeight: 1.6,
-      maxWidth: 680,
       paragraphSpacing: 1.2,
-      padding: 16,
+      paddingTop: 16,
+      paddingLeft: 16,
+      paddingRight: 16,
+      paddingBottom: 16,
+      paginationMode: 'chapter',
     },
   };
 

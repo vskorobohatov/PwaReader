@@ -14,7 +14,6 @@ export interface ReaderSettings {
 }
 
 export interface AppSettings {
-  openLastBook: boolean;
   appTheme: 'light' | 'dark';
 }
 
@@ -32,6 +31,5 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
 };
 
 export const DEFAULT_APP_SETTINGS: AppSettings = {
-  openLastBook: true,
   appTheme: 'light',
 };

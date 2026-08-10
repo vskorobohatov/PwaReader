@@ -9,7 +9,6 @@ export function getAppSettings(): AppSettings {
     if (stored) {
       const parsed = JSON.parse(stored) as AppSettings;
       return {
-        openLastBook: Boolean(parsed.openLastBook),
         appTheme: parsed.appTheme === 'dark' ? 'dark' : 'light',
       };
     }

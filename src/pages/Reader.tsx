@@ -5,6 +5,7 @@ import ReaderSettingsPanel from '../components/reader/ReaderSettingsPanel';
 import { getBook, updateBook } from '../lib/db';
 import { useReaderSettings } from '../hooks/useSettings';
 import type { ContentElement, Chapter } from '../types/fb2-content';
+import { computePages, type PageInfo } from '../lib/reader/computePages';
 import { getFontFamily } from '../App';
 
 function ReaderContent({ elements }: { elements: ContentElement[] }) {
@@ -46,15 +47,6 @@ function ReaderContent({ elements }: { elements: ContentElement[] }) {
   );
 }
 
-/**
- * Represents a single page of content in page mode.
- * Each page contains a slice of elements from a specific chapter.
- */
-interface PageInfo {
-  chapterIndex: number;
-  chapterTitle?: string;
-  elements: ContentElement[];
-}
 
 export default function Reader() {
   const { bookId } = useParams<{ bookId: string }>();
@@ -75,10 +67,6 @@ export default function Reader() {
 
   // Page mode: pre-computed pages (array of PageInfo)
   const [pages, setPages] = useState<PageInfo[]>([]);
-  const [pagesComputed, setPagesComputed] = useState(false);
-
-  // Ref to always use the latest computePages inside requestAnimationFrame callback
-  const computePagesRef = useRef<typeof computePages>(undefined);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -106,149 +94,6 @@ export default function Reader() {
     })();
   }, [bookId]);
 
-  // Compute pages when chapters or settings change (page mode only)
-  const computePages = useCallback(() => {
-    if (rs.paginationMode !== 'page') return;
-
-    const container = contentRef.current;
-    if (!container) return;
-
-    const headerHeight = 56;
-    const bottomBarHeight = 48 + 4; // page indicator + progress bar
-    const paddingTopVal = Math.max(rs.paddingTop, headerHeight);
-    const paddingBottomVal = Math.max(rs.paddingBottom, bottomBarHeight);
-
-    const viewportHeight = container.clientHeight - paddingTopVal - paddingBottomVal;
-
-    const allPages: PageInfo[] = [];
-    const fontFamily = getFontFamily(rs.fontFamily);
-    const paragraphMargin = rs.fontSize * rs.paragraphSpacing;
-
-    // Use an off-screen container for measurement
-    let measContainer = document.getElementById('__reader-measure-container__') as HTMLDivElement | null;
-    if (!measContainer) {
-      measContainer = document.createElement('div');
-      measContainer.id = '__reader-measure-container__';
-      measContainer.style.cssText = `
-        position: fixed;
-        visibility: hidden;
-        pointer-events: none;
-        font-size: ${rs.fontSize}px;
-        line-height: ${rs.lineHeight};
-        padding-left: ${rs.paddingLeft}px;
-        padding-right: ${rs.paddingRight}px;
-        font-family: ${fontFamily};
-        width: min(100vw, 42rem);
-        overflow: hidden;
-        height: 0;
-      `;
-      document.body.appendChild(measContainer);
-    } else {
-      measContainer.style.fontSize = `${rs.fontSize}px`;
-      measContainer.style.lineHeight = `${rs.lineHeight}`;
-      measContainer.style.fontFamily = fontFamily;
-    }
-
-    function measureElement(el: ContentElement): number {
-      const div = document.createElement('div');
-      measContainer!.appendChild(div);
-
-      if (el.type === 'paragraph') {
-        div.className = 'reader-paragraph';
-        div.style.marginBottom = `${paragraphMargin}px`;
-        div.innerHTML = el.html;
-      } else if (el.type === 'emptyLine') {
-        div.innerHTML = '<br />';
-      } else if (el.type === 'poem') {
-        div.className = 'reader-poem';
-        let poemHtml = '';
-        if (el.title) {
-          poemHtml += `<div class="reader-poem-title">${el.title}</div>`;
-        }
-        el.stanzas.forEach((stanza) => {
-          poemHtml += '<div style="margin-bottom:1rem;">';
-          stanza.lines.forEach((line) => {
-            poemHtml += `<div>${line}</div>`;
-          });
-          poemHtml += '</div>';
-        });
-        div.innerHTML = poemHtml;
-      } else if (el.type === 'epigraph') {
-        div.className = 'reader-epigraph';
-        div.innerHTML = el.html;
-        div.style.marginBottom = `${paragraphMargin * 1.5}px`;
-      } else if (el.type === 'image') {
-        const img = document.createElement('img');
-        img.src = el.src;
-        img.alt = el.alt || '';
-        img.style.maxWidth = '100%';
-        img.style.display = 'block';
-        img.style.margin = '1em auto';
-        div.appendChild(img);
-        return rs.fontSize * 3;
-      } else if (el.type === 'subtitle') {
-        div.className = 'reader-subtitle';
-        div.innerHTML = el.html;
-      }
-
-      const h = div.offsetHeight;
-      if (div.parentNode) div.parentNode.removeChild(div);
-      return h;
-    }
-
-    function splitElementsIntoPages(
-      elements: ContentElement[],
-      availHeight: number,
-      startChapterIdx: number,
-      chapterTitle?: string
-    ): PageInfo[] {
-      const result: PageInfo[] = [];
-      let current: ContentElement[] = [];
-      let height = 0;
-
-      for (const element of elements) {
-        const h = measureElement(element);
-
-        if (current.length > 0 && height + h > availHeight) {
-          result.push({ chapterIndex: startChapterIdx, chapterTitle: chapterTitle, elements: current });
-          current = [element];
-          height = h;
-        } else {
-          current.push(element);
-          height += h;
-        }
-      }
-
-      if (current.length > 0) {
-        result.push({ chapterIndex: startChapterIdx, chapterTitle: chapterTitle, elements: current });
-      }
-
-      return result;
-    }
-
-    // Process each chapter
-    for (let ci = 0; ci < chapters.length; ci++) {
-      const chapter = chapters[ci];
-      let remainingElements = chapter.elements;
-
-      // Handle chapter title as a separate page if chapter is long, or include with first page
-      const pagesForChapter = splitElementsIntoPages(
-        remainingElements,
-        viewportHeight,
-        ci,
-        chapter.title || `Chapter ${ci + 1}`
-      );
-
-      allPages.push(...pagesForChapter);
-    }
-
-    setPages(allPages);
-    setTotalPages(allPages.length);
-    setPagesComputed(true);
-  }, [rs, chapters]);
-
-  // Keep ref up to date so raf callback always uses the latest version
-  computePagesRef.current = computePages;
 
   // Recalculate pages when settings or chapters change
   useEffect(() => {
@@ -256,11 +101,19 @@ export default function Reader() {
     if (loading) return;
     if (rs.paginationMode !== 'page') return;
     if (chapters.length === 0) return;
-    // Reset computed flag when recalculating
-    setPagesComputed(false);
+    const container = contentRef.current;
+    if (!container) return;
     // Use requestAnimationFrame to ensure DOM is ready
     const raf = requestAnimationFrame(() => {
-      computePagesRef.current?.();
+      computePages({
+        chapters,
+        settings: rs,
+        container,
+        onPagesReady: (allPages, total) => {
+          setPages(allPages);
+          setTotalPages(total);
+        },
+      });
     });
     return () => cancelAnimationFrame(raf);
   }, [loading, rs.paginationMode, chapters, rs.fontSize, rs.lineHeight, rs.fontFamily, rs.paddingLeft, rs.paddingRight, rs.paddingTop, rs.paddingBottom, rs.paragraphSpacing]);
@@ -269,13 +122,23 @@ export default function Reader() {
   useEffect(() => {
     if (rs.paginationMode !== 'page') return;
     const handleResize = () => {
+      const container = contentRef.current;
+      if (!container) return;
       requestAnimationFrame(() => {
-        computePages();
+        computePages({
+          chapters,
+          settings: rs,
+          container,
+          onPagesReady: (allPages, total) => {
+            setPages(allPages);
+            setTotalPages(total);
+          },
+        });
       });
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [rs.paginationMode, chapters, computePages]);
+  }, [rs.paginationMode, chapters, rs]);
 
   // Reset page when chapter changes in chapter mode
   useEffect(() => {
@@ -532,8 +395,6 @@ export default function Reader() {
 
   // Current page data for page mode
   const currentPageData = pages[currentPage];
-  // Get the previous page's chapter title to detect chapter transitions
-  const prevPageChapterTitle = currentPageData?.chapterTitle;
 
   return (
     <div className="h-screen relative reader-content overflow-hidden" data-theme={rs.theme}>
@@ -616,8 +477,8 @@ export default function Reader() {
         <div className="h-full flex items-start justify-center" style={{
           paddingLeft: `${rs.paddingLeft}px`,
           paddingRight: `${rs.paddingRight}px`,
-          paddingTop: `${Math.max(rs.paddingTop, headerHeight)}px`,
-          paddingBottom: `${Math.max(rs.paddingBottom, bottomBarHeight)}px`,
+          paddingTop: `${rs.paddingTop}px`,
+          paddingBottom: `${rs.paddingBottom}px`,
         }}>
           <div className="max-w-2xl w-full">
             {rs.paginationMode === 'chapter' ? (
